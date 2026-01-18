@@ -47,37 +47,122 @@ function Restart-AudioService {
     Write-Host ""
 }
 
+# Function to enable system speakers (not Bluetooth)
+function Enable-SystemSpeakers {
+    Write-Host "[2a/8] Enabling disabled system speakers..." -ForegroundColor Green
+    
+    if ($isAdmin) {
+        try {
+            # Get speaker endpoints (excluding Bluetooth)
+            $speakerEndpoints = Get-PnpDevice | Where-Object { 
+                $_.Class -eq "AudioEndpoint" -and
+                ($_.FriendlyName -like "*Speaker*" -or $_.FriendlyName -like "*Headphone*" -or $_.FriendlyName -like "*Realtek*") -and
+                $_.FriendlyName -notlike "*Bluetooth*" -and
+                $_.FriendlyName -notlike "*BT*" -and
+                $_.Status -eq "Error" -or $_.Status -eq "Disabled" -or $_.Status -eq "Unknown"
+            }
+            
+            $enabledCount = 0
+            foreach ($endpoint in $speakerEndpoints) {
+                Write-Host "  Found disabled speaker: $($endpoint.FriendlyName) - Status: $($endpoint.Status)" -ForegroundColor Yellow
+                try {
+                    Enable-PnpDevice -InstanceId $endpoint.InstanceId -Confirm:$false -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    $refreshed = Get-PnpDevice -InstanceId $endpoint.InstanceId -ErrorAction SilentlyContinue
+                    if ($refreshed -and ($refreshed.Status -eq "OK" -or $refreshed.Status -eq "Unknown")) {
+                        Write-Host "    [OK] Enabled $($endpoint.FriendlyName)" -ForegroundColor Green
+                        $enabledCount++
+                    } else {
+                        Write-Host "    [INFO] Attempted to enable. Current status: $($refreshed.Status)" -ForegroundColor Cyan
+                    }
+                } catch {
+                    Write-Host "    [WARNING] Could not enable: $_" -ForegroundColor Yellow
+                }
+            }
+            
+            if ($enabledCount -gt 0) {
+                Write-Host "  [OK] Enabled $enabledCount system speaker device(s)" -ForegroundColor Green
+            } else {
+                Write-Host "  [INFO] No disabled system speakers found to enable" -ForegroundColor Cyan
+            }
+            
+            # Also check and enable system audio hardware devices (not Bluetooth)
+            Write-Host ""
+            Write-Host "  Checking system audio hardware devices (excluding Bluetooth)..." -ForegroundColor Yellow
+            $systemAudioDevices = Get-PnpDevice | Where-Object {
+                ($_.FriendlyName -like "*Realtek*" -or 
+                 $_.FriendlyName -like "*Intel*Audio*" -or
+                 ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                $_.FriendlyName -notlike "*Bluetooth*" -and
+                $_.FriendlyName -notlike "*BT*" -and
+                ($_.Status -eq "Error" -or $_.Status -eq "Disabled")
+            }
+            
+            foreach ($device in $systemAudioDevices) {
+                Write-Host "  Found disabled audio hardware: $($device.FriendlyName) - Status: $($device.Status)" -ForegroundColor Yellow
+                try {
+                    Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+                    Start-Sleep -Seconds 1
+                    Write-Host "    [OK] Enabled $($device.FriendlyName)" -ForegroundColor Green
+                    $enabledCount++
+                } catch {
+                    Write-Host "    [WARNING] Could not enable: $_" -ForegroundColor Yellow
+                }
+            }
+            
+        } catch {
+            Write-Host "  [ERROR] Error enabling speakers: $_" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  [WARNING] Skipping speaker enable (requires admin rights)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
 # Function to check audio devices
 function Check-AudioDevices {
     Write-Host "[2/8] Checking audio devices..." -ForegroundColor Green
     
     try {
-        # Get all audio-related devices including endpoints, controllers, and audio classes
+        # Get system audio devices (excluding Bluetooth)
         $audioDevices = Get-PnpDevice | Where-Object { 
-            $_.Class -eq "AudioEndpoint" -or 
-            $_.Class -eq "AudioEndpoint" -or
-            $_.Class -eq "System" -or
-            $_.FriendlyName -like "*audio*" -or 
-            $_.FriendlyName -like "*speaker*" -or
-            $_.FriendlyName -like "*sound*" -or
-            $_.FriendlyName -like "*Realtek*" -or
-            $_.FriendlyName -like "*Intel*Audio*" -or
-            $_.FriendlyName -like "*Microphone*"
+            ($_.Class -eq "AudioEndpoint" -or 
+             $_.Class -eq "System") -and
+            ($_.FriendlyName -like "*audio*" -or 
+             $_.FriendlyName -like "*speaker*" -or
+             $_.FriendlyName -like "*sound*" -or
+             $_.FriendlyName -like "*Realtek*" -or
+             $_.FriendlyName -like "*Intel*Audio*" -or
+             $_.FriendlyName -like "*Microphone*" -or
+             $_.FriendlyName -like "*Headphone*") -and
+            $_.FriendlyName -notlike "*Bluetooth*" -and
+            $_.FriendlyName -notlike "*BT*"
         }
         
         if ($audioDevices) {
             $problemDevices = @()
+            $systemSpeakers = @()
+            
             foreach ($device in $audioDevices) {
-                # "Unknown" status is normal for AudioEndpoint devices - they're not always active
-                # Only treat Error, Disabled, or other non-OK statuses as issues for non-endpoint devices
+                # Check if this is a speaker endpoint
+                $isSpeaker = $device.FriendlyName -like "*Speaker*" -or $device.FriendlyName -like "*Headphone*" -or $device.FriendlyName -like "*Realtek*Speaker*"
+                
                 if ($device.Class -eq "AudioEndpoint") {
                     if ($device.Status -eq "OK" -or $device.Status -eq "Unknown") {
                         $statusText = if ($device.Status -eq "OK") { "[OK]" } else { "[INFO]" }
                         $color = if ($device.Status -eq "OK") { "Green" } else { "Cyan" }
                         Write-Host "  $statusText $($device.FriendlyName) - Status: $($device.Status)" -ForegroundColor $color
+                        
+                        # Track system speakers for default device setting
+                        if ($isSpeaker) {
+                            $systemSpeakers += $device
+                        }
                     } else {
                         Write-Host "  [WARNING] $($device.FriendlyName) - Status: $($device.Status)" -ForegroundColor Yellow
                         $problemDevices += $device
+                        if ($isSpeaker) {
+                            $systemSpeakers += $device
+                        }
                     }
                 } else {
                     # For actual hardware devices (not endpoints), OK is expected
@@ -94,19 +179,31 @@ function Check-AudioDevices {
                 }
             }
             
-            if ($problemDevices.Count -gt 0) {
+            # Return both problem devices and system speakers for later processing
+            if ($problemDevices.Count -gt 0 -or $systemSpeakers.Count -gt 0) {
                 Write-Host ""
-                Write-Host "  [INFO] Found $($problemDevices.Count) device(s) with issues. Will attempt driver fixes..." -ForegroundColor Yellow
-                return $problemDevices
+                if ($problemDevices.Count -gt 0) {
+                    Write-Host "  [INFO] Found $($problemDevices.Count) device(s) with issues. Will attempt driver fixes..." -ForegroundColor Yellow
+                }
+                if ($systemSpeakers.Count -gt 0) {
+                    Write-Host "  [INFO] Found $($systemSpeakers.Count) system speaker device(s) to configure..." -ForegroundColor Cyan
+                }
+                return @{
+                    ProblemDevices = $problemDevices
+                    SystemSpeakers = $systemSpeakers
+                }
             }
         } else {
-            Write-Host "  [WARNING] No audio devices found" -ForegroundColor Yellow
+            Write-Host "  [WARNING] No system audio devices found" -ForegroundColor Yellow
         }
     } catch {
         Write-Host "  [ERROR] Error checking audio devices: $_" -ForegroundColor Red
     }
     Write-Host ""
-    return @()
+    return @{
+        ProblemDevices = @()
+        SystemSpeakers = @()
+    }
 }
 
 # Function to check and unmute audio
@@ -141,17 +238,22 @@ function Check-AudioVolume {
 
 # Function to reset audio driver
 function Reset-AudioDriver {
-    param([array]$ProblemDevices = @())
+    param([hashtable]$DeviceInfo = @{})
     
     Write-Host "[4/8] Resetting audio driver..." -ForegroundColor Green
     
     if ($isAdmin) {
         try {
-            # Reset problem devices first
+            $ProblemDevices = $DeviceInfo.ProblemDevices
+            if ($null -eq $ProblemDevices) { $ProblemDevices = @() }
+            
+            # Reset problem devices first (excluding Bluetooth)
             if ($ProblemDevices.Count -gt 0) {
-                Write-Host "  Resetting devices with issues..." -ForegroundColor Yellow
+                Write-Host "  Resetting devices with issues (excluding Bluetooth)..." -ForegroundColor Yellow
                 foreach ($device in $ProblemDevices) {
-                    if ($device.Class -ne "AudioEndpoint") {
+                    if ($device.Class -ne "AudioEndpoint" -and 
+                        $device.FriendlyName -notlike "*Bluetooth*" -and 
+                        $device.FriendlyName -notlike "*BT*") {
                         Write-Host "    Resetting $($device.FriendlyName)..." -ForegroundColor Yellow
                         Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
                         Start-Sleep -Seconds 2
@@ -162,21 +264,24 @@ function Reset-AudioDriver {
                 }
             }
             
-            # Also reset main audio hardware devices
-            Write-Host "  Resetting main audio hardware devices..." -ForegroundColor Yellow
+            # Also reset main audio hardware devices (system only, not Bluetooth)
+            Write-Host "  Resetting system audio hardware devices..." -ForegroundColor Yellow
             $audioDevices = Get-PnpDevice | Where-Object { 
-                ($_.FriendlyName -like "*Realtek*" -or 
-                 $_.FriendlyName -like "*Intel*Audio*" -or
-                 $_.FriendlyName -like "*Audio*Controller*" -or
-                 ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and 
-                $_.Status -eq "OK" 
+                (($_.FriendlyName -like "*Realtek*" -or 
+                  $_.FriendlyName -like "*Intel*Audio*" -or
+                  $_.FriendlyName -like "*Audio*Controller*" -or
+                  ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                 $_.FriendlyName -notlike "*Bluetooth*" -and
+                 $_.FriendlyName -notlike "*BT*") -and 
+                ($_.Status -eq "OK" -or $_.Status -eq "Error" -or $_.Status -eq "Disabled")
             }
             
             foreach ($device in $audioDevices) {
+                Write-Host "    Resetting $($device.FriendlyName)..." -ForegroundColor Yellow
                 Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2
                 Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Host "  [OK] Reset $($device.FriendlyName)" -ForegroundColor Green
+                Write-Host "    [OK] Reset $($device.FriendlyName)" -ForegroundColor Green
                 Start-Sleep -Seconds 1
             }
             
@@ -210,18 +315,23 @@ function Run-AudioTroubleshooter {
 
 # Function to install and update audio drivers
 function Install-UpdateAudioDrivers {
-    param([array]$ProblemDevices = @())
+    param([hashtable]$DeviceInfo = @{})
+    
+    $ProblemDevices = $DeviceInfo.ProblemDevices
+    if ($null -eq $ProblemDevices) { $ProblemDevices = @() }
     
     Write-Host "[6/8] Installing and updating audio drivers..." -ForegroundColor Green
     
     if ($isAdmin) {
         try {
-            # Get all audio hardware devices (not endpoints)
+            # Get system audio hardware devices (not endpoints, not Bluetooth)
             $audioHardware = Get-PnpDevice | Where-Object { 
-                ($_.FriendlyName -like "*Realtek*" -or 
-                 $_.FriendlyName -like "*Intel*Audio*" -or
-                 $_.FriendlyName -like "*Audio*Controller*" -or
-                 ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                (($_.FriendlyName -like "*Realtek*" -or 
+                  $_.FriendlyName -like "*Intel*Audio*" -or
+                  $_.FriendlyName -like "*Audio*Controller*" -or
+                  ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                 $_.FriendlyName -notlike "*Bluetooth*" -and
+                 $_.FriendlyName -notlike "*BT*") -and
                 $_.Class -ne "AudioEndpoint"
             }
             
@@ -317,13 +427,15 @@ function Install-UpdateAudioDrivers {
                 Write-Host "  [INFO] No audio hardware devices found to update" -ForegroundColor Cyan
             }
             
-            # Display current driver information
+            # Display current driver information (system only, not Bluetooth)
             Write-Host ""
-            Write-Host "  Current audio driver information:" -ForegroundColor Yellow
+            Write-Host "  Current system audio driver information:" -ForegroundColor Yellow
             $allAudioDevices = Get-PnpDevice | Where-Object { 
-                ($_.FriendlyName -like "*Realtek*" -or 
-                 $_.FriendlyName -like "*Intel*Audio*" -or
-                 ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                (($_.FriendlyName -like "*Realtek*" -or 
+                  $_.FriendlyName -like "*Intel*Audio*" -or
+                  ($_.Class -eq "System" -and $_.FriendlyName -like "*Audio*")) -and
+                 $_.FriendlyName -notlike "*Bluetooth*" -and
+                 $_.FriendlyName -notlike "*BT*") -and
                 $_.Class -ne "AudioEndpoint"
             } | Select-Object -First 5
             
@@ -352,27 +464,72 @@ function Install-UpdateAudioDrivers {
     Write-Host ""
 }
 
-# Function to set default audio device
+# Function to set default audio device (system speakers, not Bluetooth)
 function Set-DefaultAudioDevice {
-    Write-Host "[7/8] Checking default audio device..." -ForegroundColor Green
+    param([array]$SystemSpeakers = @())
+    
+    Write-Host "[7/8] Setting system speakers as default playback device..." -ForegroundColor Green
     
     try {
-        Write-Host "  [INFO] Check your default playback device:" -ForegroundColor Cyan
-        Write-Host "    - Right-click speaker icon in taskbar" -ForegroundColor White
-        Write-Host "    - Select 'Open Sound settings'" -ForegroundColor White
-        Write-Host "    - Under 'Output', select your speakers" -ForegroundColor White
-        Write-Host "    - Click 'Test' to verify" -ForegroundColor White
+        Write-Host "  Checking available playback devices..." -ForegroundColor Yellow
+        
+        # List available audio playback devices from PnP
+        Write-Host "  Checking system audio playback devices..." -ForegroundColor Yellow
+        $playbackDevices = Get-PnpDevice | Where-Object {
+            $_.Class -eq "AudioEndpoint" -and
+            ($_.FriendlyName -like "*Speaker*" -or $_.FriendlyName -like "*Headphone*" -or $_.FriendlyName -like "*Realtek*")
+        }
+        
+        if ($playbackDevices) {
+            $systemSpeakersFound = @()
+            foreach ($device in $playbackDevices) {
+                $deviceName = $device.FriendlyName
+                $isSystemSpeaker = ($deviceName -notlike "*Bluetooth*" -and $deviceName -notlike "*BT*" -and
+                                   ($deviceName -like "*Speaker*" -or $deviceName -like "*Realtek*" -or $deviceName -like "*Headphone*"))
+                
+                if ($isSystemSpeaker) {
+                    Write-Host "    [SYSTEM SPEAKER] $deviceName - Status: $($device.Status)" -ForegroundColor Green
+                    $systemSpeakersFound += $device
+                } else {
+                    Write-Host "    [OTHER/BLUETOOTH] $deviceName" -ForegroundColor Gray
+                }
+            }
+            
+            if ($systemSpeakersFound.Count -gt 0) {
+                Write-Host "  [INFO] Found $($systemSpeakersFound.Count) system speaker device(s)" -ForegroundColor Cyan
+                Write-Host "  [INFO] These will be available in Sound settings for selection" -ForegroundColor Cyan
+            } else {
+                Write-Host "  [WARNING] No system speakers found in available devices" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  [INFO] Checking audio endpoints..." -ForegroundColor Cyan
+        }
+        
+        # Always provide manual instructions
+        Write-Host ""
+        Write-Host "  [IMPORTANT] Manual steps to set SYSTEM SPEAKERS as default (NOT Bluetooth):" -ForegroundColor Yellow
+        Write-Host "    1. Right-click speaker icon in taskbar" -ForegroundColor White
+        Write-Host "    2. Select 'Open Sound settings'" -ForegroundColor White
+        Write-Host "    3. Under 'Output', select your SYSTEM SPEAKERS:" -ForegroundColor White
+        Write-Host "       - Look for 'Realtek Audio' or 'Speakers (Realtek Audio)'" -ForegroundColor Cyan
+        Write-Host "       - DO NOT select Bluetooth or BT devices" -ForegroundColor Red
+        Write-Host "       - Make sure it shows 'Realtek' or 'Speakers' not 'Bluetooth'" -ForegroundColor Yellow
+        Write-Host "    4. Click 'Test' to verify speakers work" -ForegroundColor White
+        Write-Host "    5. If speakers don't appear, click 'More sound settings'" -ForegroundColor White
+        Write-Host "    6. In Playback tab, right-click system speakers - Set as Default Device" -ForegroundColor White
         
         # Try to open sound settings
         try {
+            Start-Sleep -Seconds 1
             Start-Process "ms-settings:sound" -ErrorAction SilentlyContinue
-            Write-Host "  [OK] Opening Sound settings..." -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  [OK] Opening Sound settings for you..." -ForegroundColor Green
         } catch {
             Write-Host "  [INFO] You can manually open: Settings - System - Sound" -ForegroundColor Cyan
         }
         
     } catch {
-        Write-Host "  [WARNING] Could not programmatically set audio device" -ForegroundColor Yellow
+        Write-Host "  [WARNING] Could not programmatically set audio device: $_" -ForegroundColor Yellow
     }
     Write-Host ""
 }
@@ -424,17 +581,22 @@ Write-Host ""
 Restart-AudioService
 Start-Sleep -Seconds 2
 
-$problemDevices = Check-AudioDevices
+# Enable disabled system speakers first
+Enable-SystemSpeakers
+Start-Sleep -Seconds 2
+
+# Check audio devices (excluding Bluetooth)
+$deviceInfo = Check-AudioDevices
 Start-Sleep -Seconds 2
 
 Check-AudioVolume
 
-Reset-AudioDriver -ProblemDevices $problemDevices
+Reset-AudioDriver -DeviceInfo $deviceInfo
 Start-Sleep -Seconds 2
 
-Install-UpdateAudioDrivers -ProblemDevices $problemDevices
+Install-UpdateAudioDrivers -DeviceInfo $deviceInfo
 
-Set-DefaultAudioDevice
+Set-DefaultAudioDevice -SystemSpeakers $deviceInfo.SystemSpeakers
 
 Run-AudioTroubleshooter
 
